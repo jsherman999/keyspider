@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import String, event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from keyspider.db.session import Base
@@ -15,6 +16,23 @@ from keyspider.db.session import Base
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
+
+# Make PostgreSQL-specific types work with SQLite for testing
+from sqlalchemy import JSON
+from sqlalchemy.dialects.postgresql import INET, JSONB
+
+
+@event.listens_for(Base.metadata, "before_create")
+def _patch_pg_types_for_sqlite(target, connection, **kw):
+    """Replace PostgreSQL-specific column types with SQLite-compatible ones."""
+    if connection.dialect.name == "sqlite":
+        for table in target.tables.values():
+            for column in table.columns:
+                if isinstance(column.type, INET):
+                    column.type = String(45)
+                elif isinstance(column.type, JSONB):
+                    column.type = JSON()
 
 
 @pytest.fixture(scope="session")
@@ -28,6 +46,10 @@ def event_loop():
 async def db_session():
     """Create a test database session."""
     engine = create_async_engine(TEST_DATABASE_URL, echo=False)
+
+    # Import all models to register them
+    import keyspider.models  # noqa: F401
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 

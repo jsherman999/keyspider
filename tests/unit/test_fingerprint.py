@@ -11,9 +11,9 @@ from keyspider.core.fingerprint import (
     normalize_fingerprint,
 )
 
-# A known RSA public key for testing
-SAMPLE_RSA_KEY = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC7n test@example.com"
-SAMPLE_ED25519_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI user@host"
+# Valid minimal SSH public keys for testing (with proper base64 key blobs)
+SAMPLE_RSA_KEY = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAAgQAAAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSYnKCkqKywtLi8wMTIzNDU2Nzg5Ojs8PT4/QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl9gYWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXp7fH1+fw== test@example.com"
+SAMPLE_ED25519_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f user@host"
 
 
 class TestCalculateFingerprints:
