@@ -1,0 +1,4 @@
+ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC7nSRFMtKQO2V5kN3kh3GjOJkacPbR9s9z4qr admin@jumpserver
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI deploy@ci-server
+command="/usr/bin/git-shell",no-pty ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQCx git-deploy@github
+from="10.0.0.0/8" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHrestricted restricted@internal

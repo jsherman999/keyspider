@@ -1,0 +1,4 @@
+Jan  5 08:00:01 aixserver01 auth|security:info sshd[1001]: Accepted publickey for root from 10.20.0.5 port 45001 ssh2: RSA SHA256:aix_key_fp_1122aabbccdd
+Jan  5 08:01:30 aixserver01 auth|security:info sshd[1002]: Failed password for admin from 10.20.0.10 port 38201 ssh2
+Jan  5 08:03:00 aixserver01 auth|security:info sshd[1003]: Accepted password for admin from 10.20.0.15 port 51234 ssh2
+Jan  5 08:05:22 aixserver01 auth|security:info sshd[1004]: Failed publickey for deploy from 10.20.0.20 port 41234 ssh2: ED25519 SHA256:aix_deploy_fp_xxyy1234

@@ -1,0 +1,6 @@
+Jan  5 10:00:01 dbserver01 sshd[5001]: Accepted publickey for oracle from 10.10.0.5 port 49001 ssh2: RSA SHA256:rhel_key_fp_aabb1122ccdd3344
+Jan  5 10:01:30 dbserver01 sshd[5002]: Failed password for root from 172.16.5.20 port 38201 ssh2
+Jan  5 10:02:45 dbserver01 sshd[5003]: Accepted password for admin from 10.10.0.10 port 51234 ssh2
+Jan  5 10:05:00 dbserver01 sshd[5004]: Invalid user postgres from 10.10.0.99 port 60123
+Jan  5 10:06:22 dbserver01 sshd[5005]: Accepted publickey for root from 10.10.0.1 port 42001 ssh2: ED25519 SHA256:root_ed25519_fp_xxyyzz112233
+Jan  5 10:08:00 dbserver01 sshd[5006]: Disconnected from user oracle 10.10.0.5 port 49001
