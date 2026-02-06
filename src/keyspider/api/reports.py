@@ -19,7 +19,9 @@ from keyspider.models.watch_session import WatchSession
 from keyspider.schemas.report import (
     AlertAcknowledge,
     AlertNotes,
+    DormantKeyItem,
     KeyExposureItem,
+    MysteryKeyItem,
     StaleKeyItem,
     SummaryReport,
     UnreachableListResponse,
@@ -92,11 +94,112 @@ async def get_key_exposure(db: DbSession, user: CurrentUser):
     return items
 
 
+@router.get("/dormant-keys", response_model=list[DormantKeyItem])
+async def get_dormant_keys(db: DbSession, user: CurrentUser):
+    """Keys in authorized_keys that have never been seen in logs."""
+    # Get all authorized key locations
+    stmt = (
+        select(KeyLocation, SSHKey, Server)
+        .join(SSHKey, KeyLocation.ssh_key_id == SSHKey.id)
+        .join(Server, KeyLocation.server_id == Server.id)
+        .where(KeyLocation.file_type == "authorized_keys")
+    )
+    result = await db.execute(stmt)
+    rows = result.all()
+
+    now = datetime.now(timezone.utc)
+    items = []
+    for kl, key, server in rows:
+        # Check if this key has any accepted events on this server
+        event_result = await db.execute(
+            select(func.count(AccessEvent.id)).where(
+                AccessEvent.target_server_id == server.id,
+                AccessEvent.ssh_key_id == key.id,
+                AccessEvent.event_type == "accepted",
+            )
+        )
+        event_count = event_result.scalar() or 0
+        if event_count == 0:
+            items.append(DormantKeyItem(
+                ssh_key_id=key.id,
+                fingerprint_sha256=key.fingerprint_sha256,
+                key_type=key.key_type,
+                comment=key.comment,
+                server_id=server.id,
+                server_hostname=server.hostname,
+                file_path=kl.file_path,
+                first_seen_at=key.first_seen_at,
+                days_since_first_seen=(now - key.first_seen_at).days,
+            ))
+
+    items.sort(key=lambda x: x.days_since_first_seen, reverse=True)
+    return items
+
+
+@router.get("/mystery-keys", response_model=list[MysteryKeyItem])
+async def get_mystery_keys(db: DbSession, user: CurrentUser):
+    """Keys seen in auth logs but not found in any authorized_keys file."""
+    # Get fingerprints seen in accepted events
+    used_fps = await db.execute(
+        select(
+            AccessEvent.fingerprint,
+            AccessEvent.source_ip,
+            AccessEvent.username,
+            AccessEvent.target_server_id,
+            func.count(AccessEvent.id).label("event_count"),
+            func.max(AccessEvent.event_time).label("last_seen"),
+        )
+        .where(
+            AccessEvent.event_type == "accepted",
+            AccessEvent.fingerprint.isnot(None),
+        )
+        .group_by(
+            AccessEvent.fingerprint,
+            AccessEvent.source_ip,
+            AccessEvent.username,
+            AccessEvent.target_server_id,
+        )
+    )
+    rows = used_fps.all()
+
+    # Get all fingerprints in authorized_keys
+    auth_fps_result = await db.execute(
+        select(SSHKey.fingerprint_sha256)
+        .join(KeyLocation, SSHKey.id == KeyLocation.ssh_key_id)
+        .where(KeyLocation.file_type == "authorized_keys")
+        .distinct()
+    )
+    authorized_fps = {row[0] for row in auth_fps_result.all()}
+
+    items = []
+    for row in rows:
+        if row.fingerprint not in authorized_fps:
+            # Get server hostname
+            srv_result = await db.execute(
+                select(Server.hostname).where(Server.id == row.target_server_id)
+            )
+            hostname = srv_result.scalar() or "unknown"
+
+            items.append(MysteryKeyItem(
+                fingerprint=row.fingerprint,
+                last_source_ip=row.source_ip,
+                last_username=row.username,
+                server_id=row.target_server_id,
+                server_hostname=hostname,
+                event_count=row.event_count,
+                last_seen_at=row.last_seen,
+            ))
+
+    items.sort(key=lambda x: x.event_count, reverse=True)
+    return items
+
+
 @router.get("/stale-keys", response_model=list[StaleKeyItem])
 async def get_stale_keys(
     db: DbSession,
     user: CurrentUser,
     days: int = Query(90, ge=1, description="Days since last use to consider stale"),
+    age_days: int | None = Query(None, ge=1, description="Filter by key age (file_mtime) older than N days"),
 ):
     """Keys in authorized_keys with no recent use."""
     # Get authorized_keys locations
@@ -130,6 +233,12 @@ async def get_stale_keys(
             days_since = (now - key.first_seen_at).days
 
         if days_since and days_since >= days:
+            # Optional age filter based on file_mtime
+            if age_days is not None and key.file_mtime:
+                key_age = (now - key.file_mtime).days
+                if key_age < age_days:
+                    continue
+
             items.append(StaleKeyItem(
                 ssh_key_id=key.id,
                 fingerprint_sha256=key.fingerprint_sha256,

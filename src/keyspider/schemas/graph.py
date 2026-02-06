@@ -25,6 +25,8 @@ class GraphEdge(BaseModel):
     username: str | None = None
     event_count: int = 0
     is_active: bool = True
+    is_authorized: bool | None = None
+    is_used: bool | None = None
 
 
 class GraphResponse(BaseModel):

@@ -23,16 +23,23 @@ class GraphBuilder:
     def __init__(self, session: AsyncSession):
         self.session = session
 
-    async def build_full_graph(self) -> GraphResponse:
-        """Build the complete access graph from all access paths."""
+    async def build_full_graph(self, layer: str | None = None) -> GraphResponse:
+        """Build the complete access graph from all access paths.
+
+        Args:
+            layer: Optional filter - "authorization", "usage", or None for all.
+        """
         # Get all servers
         result = await self.session.execute(select(Server))
         servers = result.scalars().all()
 
-        # Get all active access paths
-        result = await self.session.execute(
-            select(AccessPath).where(AccessPath.is_active.is_(True))
-        )
+        # Get all active access paths with optional layer filter
+        stmt = select(AccessPath).where(AccessPath.is_active.is_(True))
+        if layer == "authorization":
+            stmt = stmt.where(AccessPath.is_authorized.is_(True))
+        elif layer == "usage":
+            stmt = stmt.where(AccessPath.is_used.is_(True))
+        result = await self.session.execute(stmt)
         paths = result.scalars().all()
 
         # Get unreachable sources
@@ -104,6 +111,88 @@ class GraphBuilder:
                 username=path.username,
                 event_count=path.event_count,
                 is_active=path.is_active,
+                is_authorized=path.is_authorized,
+                is_used=path.is_used,
+            ))
+
+        node_list = list(nodes.values())
+        return GraphResponse(
+            nodes=node_list,
+            edges=edges,
+            node_count=len(node_list),
+            edge_count=len(edges),
+        )
+
+    async def build_layered_graph(
+        self,
+        layer: str = "all",
+        show_dormant: bool = True,
+        show_mystery: bool = True,
+    ) -> GraphResponse:
+        """Build a graph with layer filtering.
+
+        Args:
+            layer: "all", "authorization", "usage"
+            show_dormant: Include authorized but never used paths
+            show_mystery: Include used but not authorized paths
+        """
+        stmt = select(AccessPath).where(AccessPath.is_active.is_(True))
+
+        if layer == "authorization":
+            stmt = stmt.where(AccessPath.is_authorized.is_(True))
+        elif layer == "usage":
+            stmt = stmt.where(AccessPath.is_used.is_(True))
+
+        if not show_dormant:
+            # Exclude paths that are authorized but not used
+            stmt = stmt.where(
+                ~(and_(AccessPath.is_authorized.is_(True), AccessPath.is_used.is_(False)))
+            )
+        if not show_mystery:
+            # Exclude paths that are used but not authorized
+            stmt = stmt.where(
+                ~(and_(AccessPath.is_used.is_(True), AccessPath.is_authorized.is_(False)))
+            )
+
+        result = await self.session.execute(stmt)
+        paths = result.scalars().all()
+
+        # Collect server IDs
+        server_ids = set()
+        for path in paths:
+            if path.source_server_id:
+                server_ids.add(path.source_server_id)
+            server_ids.add(path.target_server_id)
+
+        nodes = {}
+        if server_ids:
+            result = await self.session.execute(
+                select(Server).where(Server.id.in_(server_ids))
+            )
+            for server in result.scalars().all():
+                node_id = f"server-{server.id}"
+                nodes[node_id] = GraphNode(
+                    id=node_id,
+                    label=server.hostname,
+                    type="server",
+                    ip_address=server.ip_address,
+                    os_type=server.os_type,
+                    is_reachable=server.is_reachable,
+                )
+
+        edges = []
+        for path in paths:
+            if not path.source_server_id:
+                continue
+            edges.append(GraphEdge(
+                id=f"path-{path.id}",
+                source=f"server-{path.source_server_id}",
+                target=f"server-{path.target_server_id}",
+                username=path.username,
+                event_count=path.event_count,
+                is_active=path.is_active,
+                is_authorized=path.is_authorized,
+                is_used=path.is_used,
             ))
 
         node_list = list(nodes.values())
@@ -173,6 +262,8 @@ class GraphBuilder:
                         username=path.username,
                         event_count=path.event_count,
                         is_active=path.is_active,
+                        is_authorized=path.is_authorized,
+                        is_used=path.is_used,
                     ))
 
         # Add unreachable sources targeting visited servers
@@ -237,6 +328,8 @@ class GraphBuilder:
                     username=path.username,
                     event_count=path.event_count,
                     is_active=path.is_active,
+                    is_authorized=path.is_authorized,
+                    is_used=path.is_used,
                 ))
 
         # Fetch server info
@@ -325,6 +418,8 @@ class GraphBuilder:
                     target=f"server-{ap.target_server_id}",
                     username=ap.username,
                     event_count=ap.event_count,
+                    is_authorized=ap.is_authorized,
+                    is_used=ap.is_used,
                 ))
 
         node_list = list(nodes.values())

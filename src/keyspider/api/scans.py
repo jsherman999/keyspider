@@ -29,18 +29,22 @@ async def create_scan(request: ScanCreate, db: DbSession, user: OperatorUser):
     await db.commit()
     await db.refresh(job)
 
-    # Dispatch the appropriate task
-    if request.job_type == "server_scan" and request.seed_server_id:
-        scan_single_server.delay(job.id, request.seed_server_id)
-    elif request.job_type == "spider_crawl" and request.seed_server_id:
-        spider_crawl.delay(job.id, request.seed_server_id, request.max_depth)
-    elif request.job_type == "full_scan":
-        # Full scan: get all servers and dispatch individual scans
-        from keyspider.models.server import Server
-        result = await db.execute(select(Server).where(Server.is_reachable.is_(True)))
-        servers = result.scalars().all()
-        for server in servers:
-            scan_single_server.delay(job.id, server.id)
+    # Dispatch the appropriate task (skip if broker is unavailable)
+    try:
+        if request.job_type == "server_scan" and request.seed_server_id:
+            scan_single_server.delay(job.id, request.seed_server_id)
+        elif request.job_type == "spider_crawl" and request.seed_server_id:
+            spider_crawl.delay(job.id, request.seed_server_id, request.max_depth)
+        elif request.job_type == "full_scan":
+            from keyspider.models.server import Server
+            result = await db.execute(select(Server).where(Server.is_reachable.is_(True)))
+            servers = result.scalars().all()
+            for server in servers:
+                scan_single_server.delay(job.id, server.id)
+    except Exception:
+        # Celery broker not available -- job is recorded but won't execute
+        import logging
+        logging.getLogger(__name__).warning("Celery broker unavailable; scan job %d recorded but not dispatched", job.id)
 
     return job
 

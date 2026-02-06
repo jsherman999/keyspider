@@ -12,7 +12,7 @@ SSH key usage monitoring and tracking application. Keyspider operates from a cen
                            │
                     ┌──────┴──────┐
                     │  FastAPI    │  REST API + WebSocket
-                    │  :8000      │  JWT / API key auth
+                    │  :8000      │  JWT / API key / Agent token auth
                     └──────┬──────┘
                            │
               ┌────────────┼────────────┐
@@ -26,14 +26,22 @@ SSH key usage monitoring and tracking application. Keyspider operates from a cen
               │           │            │
        ┌──────┴───────────┴────────────┴──────┐
        │          PostgreSQL 13 + Redis        │
-       └──────────────────────────────────────┘
+       └──────────────────┬───────────────────┘
+                          │
+              ┌───────────┴───────────┐
+              │   Target Servers      │
+              │   ┌─────────────────┐ │
+              │   │ Keyspider Agent │ │  Deployed via SSH
+              │   │ (stdlib Python) │ │  heartbeat + events
+              │   └─────────────────┘ │  → POST /api/agent/*
+              └───────────────────────┘
 ```
 
 ### Technology Stack
 
 | Component    | Technology                          |
 |-------------|-------------------------------------|
-| Backend     | Python 3.11+ / FastAPI (async)      |
+| Backend     | Python 3.14 / FastAPI (async)       |
 | SSH         | asyncssh                            |
 | Task Queue  | Celery + Redis                      |
 | Database    | PostgreSQL 13                       |
@@ -63,21 +71,25 @@ Recursive BFS crawler that starts from a seed server and automatically discovers
 ### Log Parsing
 Parses SSH authentication events from multiple log formats:
 
-| OS             | Log Path                           |
+| OS             | Log Path / Source                  |
 |----------------|------------------------------------|
 | Debian/Ubuntu  | `/var/log/auth.log`                |
 | RHEL/CentOS    | `/var/log/secure`                  |
 | AIX            | `/var/adm/syslog`, `/var/log/syslog` |
+| systemd        | `journalctl -u sshd --output=json` |
 
 Extracts: timestamp, source IP, username, auth method, key fingerprint (SHA256/MD5), accept/reject status, disconnect events.
 
+Supports journalctl JSON output for structured parsing with accurate timestamps (avoids syslog year ambiguity). Includes year rollover detection for syslog format and incremental scanning via watermark timestamps.
+
 ### Key Scanner
-Discovers SSH key material on remote servers:
+Discovers SSH key material on remote servers via SFTP (no shell commands):
 - `~/.ssh/authorized_keys` for all users (parses `/etc/passwd` for home directories)
 - `~/.ssh/id_*` identity keys (public keys only -- private key content is never stored)
 - `/etc/ssh/ssh_host_*_key.pub` host keys
 - Calculates SHA256 and MD5 fingerprints
-- Records file ownership and permissions
+- Records file ownership, permissions, mtime, and size
+- Tracks key age via file modification time
 
 ### Real-time Watcher
 Persistent SSH connections that `tail -F` auth logs for live monitoring:
@@ -104,6 +116,21 @@ Interactive Cytoscape.js visualization of all SSH access relationships:
 - Key-centered views showing everywhere a specific key is used
 - Path finding between any two servers (BFS)
 - Unreachable sources highlighted in red
+- **Authorization vs Usage layers**: filter by authorized access (keys in authorized_keys), actual usage (keys seen in logs), or both
+- Dormant key highlighting (authorized but never used)
+- Mystery key highlighting (used but not in authorized_keys)
+
+### Agent System
+Lightweight Python agent deployed to target servers for continuous data collection:
+- Single-file stdlib-only Python agent (no external dependencies on targets)
+- Deployed via existing SSH root key, runs as systemd service
+- Heartbeat reporting every 60 seconds
+- Incremental SSH auth log collection with byte-offset tracking
+- Sudo event monitoring and collection
+- Key inventory scanning on demand
+- Bearer token auth (SHA256 hashed, unique per server)
+- Servers with active agents skip SSH-based scanning automatically
+- Bulk deployment to multiple servers
 
 ## Project Structure
 
@@ -121,7 +148,7 @@ keyspider/
 │   ├── config.py                    # pydantic-settings config
 │   ├── dependencies.py              # Auth, DB, role-based access
 │   │
-│   ├── models/                      # SQLAlchemy ORM (10 tables)
+│   ├── models/                      # SQLAlchemy ORM (12 tables)
 │   │   ├── server.py                # Servers inventory
 │   │   ├── ssh_key.py               # Discovered SSH keys
 │   │   ├── key_location.py          # Key file locations on servers
@@ -130,6 +157,8 @@ keyspider/
 │   │   ├── scan_job.py              # Scan job tracking
 │   │   ├── watch_session.py         # Watcher sessions
 │   │   ├── unreachable_source.py    # Flagged unreachable sources
+│   │   ├── agent_status.py          # Agent deployment + heartbeat
+│   │   ├── sudo_event.py            # Sudo event tracking
 │   │   ├── user.py                  # App users
 │   │   └── api_key.py               # API keys
 │   │
@@ -140,19 +169,23 @@ keyspider/
 │   │   ├── keys.py                  # Key lookup + locations
 │   │   ├── scans.py                 # Scan launch + status
 │   │   ├── watch.py                 # Watcher management
-│   │   ├── graph.py                 # Graph queries
+│   │   ├── graph.py                 # Graph queries + layered views
 │   │   ├── reports.py               # Reports + exports
+│   │   ├── agents.py               # Agent management (deploy/status)
+│   │   ├── agent_receiver.py       # Agent data ingestion endpoints
 │   │   └── ws.py                    # WebSocket endpoints
 │   │
 │   ├── core/                        # Business logic
-│   │   ├── ssh_connector.py         # asyncssh connection pool
-│   │   ├── log_parser.py            # Auth log parsing
-│   │   ├── key_scanner.py           # Key file discovery
+│   │   ├── ssh_connector.py         # asyncssh connection pool (wrapper_id tracking)
+│   │   ├── sftp_reader.py           # Secure file operations via SFTP
+│   │   ├── log_parser.py            # Auth log + journalctl + sudo parsing
+│   │   ├── key_scanner.py           # Key file discovery (SFTP-based)
 │   │   ├── fingerprint.py           # SHA256/MD5 fingerprinting
 │   │   ├── spider_engine.py         # Recursive BFS crawler
 │   │   ├── watcher.py               # Real-time log tailing
 │   │   ├── unreachable_detector.py  # Reachability + severity
-│   │   └── graph_builder.py         # Graph construction
+│   │   ├── graph_builder.py         # Graph construction (layered)
+│   │   └── agent_manager.py         # Agent deployment via SSH
 │   │
 │   ├── workers/                     # Celery tasks
 │   │   ├── celery_app.py            # Config + beat schedule
@@ -164,6 +197,9 @@ keyspider/
 │   ├── db/                          # Database layer
 │   │   ├── session.py               # Async engine + session factory
 │   │   └── queries.py               # paginate(), get_or_create()
+│   │
+│   ├── agent/                       # Deployed agent script
+│   │   └── keyspider_agent.py       # Standalone agent (stdlib only)
 │   │
 │   └── cli/                         # Typer CLI
 │       ├── main.py                  # Entry point
@@ -179,7 +215,7 @@ keyspider/
 │   └── src/
 │       ├── api/                     # Axios client + TanStack Query hooks
 │       ├── components/              # Layout, graph, common UI
-│       └── pages/                   # 12 pages (see below)
+│       └── pages/                   # 13 pages (see below)
 │
 └── tests/
     ├── unit/                        # log_parser, fingerprint, key_scanner, spider
@@ -355,19 +391,40 @@ All endpoints are prefixed with `/api`. Authentication required unless noted.
 ### Graph
 | Method | Path                          | Description                    |
 |--------|------------------------------|--------------------------------|
-| GET    | `/api/graph`                  | Full access graph              |
+| GET    | `/api/graph`                  | Full access graph (optional `layer` param) |
 | GET    | `/api/graph/server/{id}`      | Server-centered subgraph       |
 | GET    | `/api/graph/key/{id}`         | Key usage subgraph             |
 | GET    | `/api/graph/path?from=&to=`   | Find paths between servers     |
+| GET    | `/api/graph/layered`          | Layered graph with dormant/mystery toggles |
 
 ### Reports
 | Method | Path                          | Description                |
 |--------|------------------------------|----------------------------|
 | GET    | `/api/reports/unreachable`    | Unreachable sources        |
 | GET    | `/api/reports/key-exposure`   | Keys on multiple servers   |
-| GET    | `/api/reports/stale-keys`     | Unused authorized keys     |
+| GET    | `/api/reports/stale-keys`     | Unused authorized keys (optional `age_days` filter) |
+| GET    | `/api/reports/dormant-keys`   | Authorized but never used keys |
+| GET    | `/api/reports/mystery-keys`   | Used but not in authorized_keys |
 | GET    | `/api/reports/summary`        | Environment summary stats  |
 | POST   | `/api/reports/generate`       | Export report (CSV/JSON)   |
+
+### Agents (Management)
+| Method | Path                              | Description                |
+|--------|----------------------------------|----------------------------|
+| GET    | `/api/agents`                     | List all agents with status |
+| GET    | `/api/agents/{server_id}`         | Agent status for server    |
+| POST   | `/api/agents/deploy/{server_id}`  | Deploy agent to server     |
+| POST   | `/api/agents/deploy-batch`        | Deploy to multiple servers |
+| POST   | `/api/agents/{server_id}/uninstall` | Uninstall agent          |
+| GET    | `/api/agents/{server_id}/sudo-events` | Sudo events (paginated) |
+
+### Agent Receiver (for agents)
+| Method | Path                    | Description                |
+|--------|------------------------|----------------------------|
+| POST   | `/api/agent/heartbeat`  | Agent heartbeat            |
+| POST   | `/api/agent/events`     | SSH auth events from agent |
+| POST   | `/api/agent/sudo-events`| Sudo events from agent     |
+| POST   | `/api/agent/keys`       | Key inventory from agent   |
 
 ### WebSocket
 | Path                           | Description                    |
@@ -380,15 +437,16 @@ All endpoints are prefixed with `/api`. Authentication required unless noted.
 | Page              | Description                                                    |
 |-------------------|----------------------------------------------------------------|
 | Dashboard         | Summary stats, recent events, active watchers, top alerts      |
-| Graph Explorer    | Interactive Cytoscape.js graph with filtering and drill-down   |
+| Graph Explorer    | Interactive Cytoscape.js graph with layer filter (authorization/usage/all), dormant/mystery edge highlighting |
 | Servers           | Searchable server table with status badges                     |
-| Server Detail     | Server info, keys, events timeline, mini access graph          |
+| Server Detail     | Server info, keys, events, paths, agent status, sudo events (tabbed) |
 | Keys              | Searchable key table filtered by type and location count       |
 | Key Detail        | Key info, all file locations, access events, servers           |
 | Scanner           | Launch scans, monitor progress, view results                   |
 | Watcher           | Start/stop watchers, live scrollable log view with search      |
-| Alerts            | Unreachable sources sorted by severity, acknowledge and notes  |
-| Reports           | Generate and view reports                                      |
+| Agents            | Agent deployment status table, bulk deploy, health indicators  |
+| Alerts            | Unreachable sources + mystery keys (tabbed)                    |
+| Reports           | Summary, key exposure, stale keys, dormant keys, mystery keys (tabbed) |
 | Settings          | User management, API keys, system configuration                |
 | Login             | Authentication page                                            |
 
@@ -415,13 +473,17 @@ All settings are configurable via environment variables:
 | `SPIDER_MAX_DEPTH`         | `50`                             | Maximum allowed crawl depth      |
 | `WATCHER_RECONNECT_DELAY`  | `5`                              | Initial reconnect delay (seconds)|
 | `WATCHER_MAX_RECONNECT_DELAY` | `300`                         | Max reconnect delay (seconds)    |
+| `LOG_MAX_LINES_INITIAL`  | `50000`                           | Max log lines for initial scan   |
+| `LOG_MAX_LINES_INCREMENTAL` | `50000`                        | Max log lines for incremental scan |
 
 ## Security
 
 - SSH private keys are mounted read-only into containers -- never copied or written to
 - Private key **content** is never stored in the database -- only fingerprints, file paths, and metadata
+- All remote file operations use SFTP -- no shell command injection possible
 - JWT authentication with configurable expiry and HS256 signing
 - API key authentication with bcrypt hashing and scoped permissions
+- Agent tokens use SHA256 hashing (unique per server, never stored in plaintext)
 - Role-based access control: `admin` (full), `operator` (scan/watch), `viewer` (read-only)
 - All scan and watch operations logged with initiator for audit trail
 - Non-root container users in all Dockerfiles
@@ -429,16 +491,18 @@ All settings are configurable via environment variables:
 
 ## Database
 
-PostgreSQL 13 with 10 tables:
+PostgreSQL 13 with 12 tables:
 
-- `servers` -- Server inventory with OS type, SSH port, reachability status
-- `ssh_keys` -- Discovered keys indexed by SHA256 fingerprint
-- `key_locations` -- Where key files exist (server, path, owner, permissions)
+- `servers` -- Server inventory with OS type, SSH port, reachability, scan watermark, agent preference
+- `ssh_keys` -- Discovered keys indexed by SHA256 fingerprint, with file mtime and estimated age
+- `key_locations` -- Where key files exist (server, path, owner, permissions, mtime, graph layer)
 - `access_events` -- Individual auth log events (source IP, fingerprint, accept/reject)
-- `access_paths` -- Aggregated access relationships with event counts
+- `access_paths` -- Aggregated access relationships with authorization/usage flags
 - `scan_jobs` -- Scan job tracking (type, status, progress counters)
 - `watch_sessions` -- Active watcher sessions with auto-spider config
 - `unreachable_sources` -- Flagged unreachable sources with severity
+- `agent_status` -- Agent deployment status, heartbeat, version, token hash (one per server)
+- `sudo_events` -- Sudo command execution events (username, command, target user, success)
 - `users` -- Application users with roles
 - `api_keys` -- API keys with scoped permissions and expiry
 

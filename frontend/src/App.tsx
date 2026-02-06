@@ -8,6 +8,7 @@ import KeyDetail from './pages/KeyDetail';
 import GraphExplorer from './pages/GraphExplorer';
 import Scanner from './pages/Scanner';
 import Watcher from './pages/Watcher';
+import Agents from './pages/Agents';
 import Alerts from './pages/Alerts';
 import Reports from './pages/Reports';
 import Settings from './pages/Settings';
@@ -39,6 +40,7 @@ export default function App() {
         <Route path="graph" element={<GraphExplorer />} />
         <Route path="scanner" element={<Scanner />} />
         <Route path="watcher" element={<Watcher />} />
+        <Route path="agents" element={<Agents />} />
         <Route path="alerts" element={<Alerts />} />
         <Route path="reports" element={<Reports />} />
         <Route path="settings" element={<Settings />} />

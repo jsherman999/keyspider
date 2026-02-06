@@ -52,6 +52,17 @@ async def list_servers(
 
 @router.post("", response_model=ServerResponse, status_code=201)
 async def create_server(request: ServerCreate, db: DbSession, user: OperatorUser):
+    # Return existing server if ip_address+port already exists
+    result = await db.execute(
+        select(Server).where(
+            Server.ip_address == request.ip_address,
+            Server.ssh_port == request.ssh_port,
+        )
+    )
+    existing = result.scalar_one_or_none()
+    if existing:
+        return existing
+
     server = Server(**request.model_dump())
     db.add(server)
     await db.commit()

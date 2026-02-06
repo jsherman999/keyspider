@@ -37,6 +37,7 @@ class LogWatcher:
         self._process: asyncssh.SSHClientProcess | None = None
         self._running = False
         self._callbacks: list[Callable[[AuthEvent], None]] = []
+        self._event_queues: list[asyncio.Queue[AuthEvent | None]] = []
 
     def on_event(self, callback: Callable[[AuthEvent], None]) -> None:
         """Register a callback for new auth events."""
@@ -103,8 +104,16 @@ class LogWatcher:
                         logger.error("Watcher callback error: %s", e)
 
     async def stop(self) -> None:
-        """Stop the watcher."""
+        """Stop the watcher and unblock all event generators."""
         self._running = False
+
+        # Send sentinel to all registered queues to unblock waiters
+        for q in self._event_queues:
+            try:
+                q.put_nowait(None)
+            except asyncio.QueueFull:
+                pass
+
         if self._process:
             self._process.close()
             self._process = None
@@ -119,7 +128,8 @@ class LogWatcher:
 
     async def events(self) -> AsyncIterator[AuthEvent]:
         """Async iterator that yields auth events."""
-        queue: asyncio.Queue[AuthEvent] = asyncio.Queue()
+        queue: asyncio.Queue[AuthEvent | None] = asyncio.Queue()
+        self._event_queues.append(queue)
 
         def enqueue(event: AuthEvent):
             queue.put_nowait(event)
@@ -130,8 +140,15 @@ class LogWatcher:
             while self._running:
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=1.0)
+                    if event is None:
+                        # Sentinel received - watcher is stopping
+                        break
                     yield event
                 except asyncio.TimeoutError:
                     continue
         finally:
-            self._callbacks.remove(enqueue)
+            # Clean up callback and queue reference
+            if enqueue in self._callbacks:
+                self._callbacks.remove(enqueue)
+            if queue in self._event_queues:
+                self._event_queues.remove(queue)

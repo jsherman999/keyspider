@@ -12,9 +12,25 @@ router = APIRouter()
 
 
 @router.get("", response_model=GraphResponse)
-async def get_full_graph(db: DbSession, user: CurrentUser):
+async def get_full_graph(
+    db: DbSession,
+    user: CurrentUser,
+    layer: str | None = Query(None, description="Filter: authorization, usage, or None for all"),
+):
     builder = GraphBuilder(db)
-    return await builder.build_full_graph()
+    return await builder.build_full_graph(layer=layer)
+
+
+@router.get("/layered", response_model=GraphResponse)
+async def get_layered_graph(
+    db: DbSession,
+    user: CurrentUser,
+    layer: str = Query("all", description="all, authorization, or usage"),
+    show_dormant: bool = Query(True, description="Show authorized but unused paths"),
+    show_mystery: bool = Query(True, description="Show used but unauthorized paths"),
+):
+    builder = GraphBuilder(db)
+    return await builder.build_layered_graph(layer, show_dormant, show_mystery)
 
 
 @router.get("/server/{server_id}", response_model=GraphResponse)

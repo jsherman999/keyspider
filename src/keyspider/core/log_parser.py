@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import logging
 from dataclasses import dataclass
@@ -101,23 +102,57 @@ _AIX_FAILED_RE = re.compile(
     r"(?:\s+ssh2:\s+\S+\s+(?P<fingerprint>\S+))?"
 )
 
+# Sudo log regex
+_SUDO_RE = re.compile(
+    r"(?P<timestamp>\w+\s+\d+\s+[\d:]+)\s+"
+    r"(?P<hostname>\S+)\s+"
+    r"sudo(?:\[\d+\])?:\s+"
+    r"(?P<username>\S+)\s+:\s+"
+    r"TTY=(?P<tty>\S+)\s+;\s+"
+    r"PWD=(?P<pwd>\S+)\s+;\s+"
+    r"USER=(?P<target_user>\S+)\s+;\s+"
+    r"COMMAND=(?P<command>.+)"
+)
 
-def _parse_syslog_timestamp(ts_str: str, reference_year: int | None = None) -> datetime:
+
+def _parse_syslog_timestamp(
+    ts_str: str,
+    reference_time: datetime | None = None,
+    last_timestamp: datetime | None = None,
+) -> datetime:
     """Parse a syslog timestamp (e.g., 'Jan  5 14:23:01') into a datetime.
 
-    Syslog timestamps lack a year, so we use the reference year or current year.
+    Syslog timestamps lack a year, so we use the reference time year or current year.
+    If a parsed timestamp jumps backwards >300 days compared to last_timestamp,
+    we decrement the year (log spans year boundary).
     """
-    year = reference_year or datetime.now(timezone.utc).year
+    year = datetime.now(timezone.utc).year
+    if reference_time:
+        year = reference_time.year
+
     # Normalize whitespace (syslog uses double space for single-digit days)
     ts_str = re.sub(r"\s+", " ", ts_str.strip())
     try:
         dt = datetime.strptime(f"{year} {ts_str}", "%Y %b %d %H:%M:%S")
-        return dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=timezone.utc)
+
+        # Year rollover detection
+        if last_timestamp and (last_timestamp - dt).days > 300:
+            year -= 1
+            dt = datetime.strptime(f"{year} {ts_str}", "%Y %b %d %H:%M:%S")
+            dt = dt.replace(tzinfo=timezone.utc)
+
+        return dt
     except ValueError:
         return datetime.now(timezone.utc)
 
 
-def parse_line(line: str, os_type: str = "linux", reference_year: int | None = None) -> AuthEvent | None:
+def parse_line(
+    line: str,
+    os_type: str = "linux",
+    reference_time: datetime | None = None,
+    last_timestamp: datetime | None = None,
+) -> AuthEvent | None:
     """Parse a single log line into an AuthEvent, or None if not an SSH event."""
     line = line.strip()
     if not line or "sshd[" not in line:
@@ -142,7 +177,9 @@ def parse_line(line: str, os_type: str = "linux", reference_year: int | None = N
         if m:
             groups = m.groupdict()
             return AuthEvent(
-                timestamp=_parse_syslog_timestamp(groups["timestamp"], reference_year),
+                timestamp=_parse_syslog_timestamp(
+                    groups["timestamp"], reference_time, last_timestamp
+                ),
                 source_ip=groups["ip"],
                 username=groups.get("username", "unknown"),
                 auth_method=groups.get("method"),
@@ -156,11 +193,108 @@ def parse_line(line: str, os_type: str = "linux", reference_year: int | None = N
     return None
 
 
-def parse_log(content: str, os_type: str = "linux", reference_year: int | None = None) -> list[AuthEvent]:
+def parse_log(
+    content: str,
+    os_type: str = "linux",
+    reference_time: datetime | None = None,
+) -> list[AuthEvent]:
     """Parse an entire log file content into a list of AuthEvents."""
     events = []
+    last_ts: datetime | None = None
     for line in content.splitlines():
-        event = parse_line(line, os_type, reference_year)
+        event = parse_line(line, os_type, reference_time, last_ts)
+        if event:
+            last_ts = event.timestamp
+            events.append(event)
+    return events
+
+
+@dataclass
+class SudoLogEvent:
+    """Parsed sudo event from syslog."""
+
+    timestamp: datetime
+    username: str
+    tty: str
+    working_dir: str
+    target_user: str
+    command: str
+    raw_line: str
+    success: bool = True
+
+
+def parse_sudo_line(
+    line: str,
+    reference_time: datetime | None = None,
+    last_timestamp: datetime | None = None,
+) -> SudoLogEvent | None:
+    """Parse a single sudo log line."""
+    line = line.strip()
+    if not line or "sudo" not in line:
+        return None
+
+    m = _SUDO_RE.match(line)
+    if m:
+        groups = m.groupdict()
+        return SudoLogEvent(
+            timestamp=_parse_syslog_timestamp(
+                groups["timestamp"], reference_time, last_timestamp
+            ),
+            username=groups["username"],
+            tty=groups["tty"],
+            working_dir=groups["pwd"],
+            target_user=groups["target_user"],
+            command=groups["command"].strip(),
+            raw_line=line,
+        )
+    return None
+
+
+def parse_journalctl_json(json_line: str) -> AuthEvent | None:
+    """Parse a single journalctl JSON line into an AuthEvent."""
+    try:
+        data = json.loads(json_line)
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+    message = data.get("MESSAGE", "")
+    if not message or "sshd" not in data.get("SYSLOG_IDENTIFIER", ""):
+        return None
+
+    # Get timestamp from __REALTIME_TIMESTAMP (microseconds since epoch)
+    ts_usec = data.get("__REALTIME_TIMESTAMP")
+    if ts_usec:
+        try:
+            ts = datetime.fromtimestamp(int(ts_usec) / 1_000_000, tz=timezone.utc)
+        except (ValueError, OSError):
+            ts = datetime.now(timezone.utc)
+    else:
+        ts = datetime.now(timezone.utc)
+
+    pid = data.get("_PID")
+
+    # Try matching the message portion against our patterns
+    # We construct a fake syslog line for the regex
+    fake_line = f"Jan  1 00:00:00 host sshd[{pid or 0}]: {message}"
+    event = parse_line(fake_line)
+    if event:
+        # Replace timestamp with the real one from journald
+        event.timestamp = ts
+        event.pid = int(pid) if pid else event.pid
+        event.raw_line = json_line
+        return event
+
+    return None
+
+
+def parse_journalctl_output(content: str) -> list[AuthEvent]:
+    """Parse multi-line journalctl JSON output into AuthEvents."""
+    events = []
+    for line in content.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        event = parse_journalctl_json(line)
         if event:
             events.append(event)
     return events

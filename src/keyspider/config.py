@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     spider_default_depth: int = 10
     spider_max_depth: int = 50
 
+    # Log scanning
+    log_max_lines_initial: int = 50000
+    log_max_lines_incremental: int = 50000
+
     # Watcher
     watcher_reconnect_delay: int = 5
     watcher_max_reconnect_delay: int = 300

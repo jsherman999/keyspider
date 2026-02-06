@@ -10,8 +10,15 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from keyspider.config import settings
 from keyspider.core.key_scanner import DiscoveredKey, scan_server_keys
-from keyspider.core.log_parser import AuthEvent, detect_log_paths, parse_log
+from keyspider.core.log_parser import (
+    AuthEvent,
+    detect_log_paths,
+    parse_log,
+    parse_journalctl_output,
+)
+from keyspider.core.sftp_reader import SFTPReader
 from keyspider.core.ssh_connector import SSHConnectionPool
 from keyspider.core.unreachable_detector import UnreachableDetector
 from keyspider.db.queries import get_or_create
@@ -105,42 +112,135 @@ class SpiderEngine:
             ssh_port=port,
         )
 
-        # 1. Parse auth logs
-        events = await self._parse_server_logs(server)
-        self.progress.events_parsed += len(events)
+        # Check if agent is active for this server
+        if server.prefer_agent:
+            from keyspider.models.agent_status import AgentStatus
+            result = await self.session.execute(
+                select(AgentStatus).where(
+                    AgentStatus.server_id == server.id,
+                    AgentStatus.deployment_status == "active",
+                )
+            )
+            agent = result.scalar_one_or_none()
+            if agent and agent.last_heartbeat_at:
+                age = (datetime.now(timezone.utc) - agent.last_heartbeat_at).total_seconds()
+                if age < 300:  # 5 minutes
+                    # Agent is active, skip SSH scanning
+                    server.last_scanned_at = datetime.now(timezone.utc)
+                    self.progress.servers_scanned += 1
+                    await self.session.commit()
+                    return
 
-        # 2. Scan for key files
-        keys = await self._scan_server_keys(server)
-        self.progress.keys_found += len(keys)
+        # Get SSH connection for this server
+        wrapper = await self.pool.get_connection(hostname, port)
+        try:
+            conn = wrapper.conn
 
-        # 3. Store keys and events in DB
-        await self._store_keys(server, keys)
-        key_map = await self._store_events(server, events)
+            # 1. Parse auth logs
+            events = await self._parse_server_logs(server, conn)
+            self.progress.events_parsed += len(events)
 
-        # 4. Process source IPs and follow chains
-        source_ips = {e.source_ip for e in events if e.source_ip}
-        for source_ip in source_ips:
-            await self._process_source_ip(source_ip, server, depth)
+            # 2. Scan for key files
+            keys = await self._scan_server_keys(server, conn)
+            self.progress.keys_found += len(keys)
 
-        # 5. Update server record
-        server.last_scanned_at = datetime.now(timezone.utc)
-        server.is_reachable = True
-        self.progress.servers_scanned += 1
+            # 3. Store keys and events in DB (batch operations)
+            await self._store_keys(server, keys)
+            await self._store_events(server, events)
 
-        await self.session.commit()
+            # 4. Cross-reference graph layers
+            await self._cross_reference_layers(server)
 
-    async def _parse_server_logs(self, server: Server) -> list[AuthEvent]:
-        """Parse auth logs on a server."""
+            # 5. Process source IPs and follow chains
+            source_ips = {e.source_ip for e in events if e.source_ip}
+            for source_ip in source_ips:
+                await self._process_source_ip(source_ip, server, depth)
+
+            # 6. Update server record
+            server.last_scanned_at = datetime.now(timezone.utc)
+            server.is_reachable = True
+            self.progress.servers_scanned += 1
+
+            await self.session.commit()
+        finally:
+            await self.pool.release_connection(wrapper.wrapper_id)
+
+    async def _parse_server_logs(
+        self, server: Server, conn
+    ) -> list[AuthEvent]:
+        """Parse auth logs on a server using journalctl or SFTP."""
         all_events: list[AuthEvent] = []
-        log_paths = detect_log_paths(server.os_type)
 
+        max_lines = settings.log_max_lines_initial
+        if server.scan_watermark:
+            max_lines = settings.log_max_lines_incremental
+
+        # Try journalctl first (structured output with real timestamps)
+        try:
+            cmd = f"journalctl -u sshd --output=json -n {max_lines}"
+            if server.scan_watermark:
+                cmd += f' --since="{server.scan_watermark}"'
+            result = await asyncio.wait_for(
+                conn.run(cmd, check=False), timeout=30
+            )
+            if result.exit_status == 0 and result.stdout:
+                events = parse_journalctl_output(result.stdout)
+                if events:
+                    # Filter by watermark
+                    if server.scan_watermark:
+                        try:
+                            wm = datetime.fromisoformat(server.scan_watermark)
+                            events = [e for e in events if e.timestamp > wm]
+                        except ValueError:
+                            pass
+                    # Update watermark
+                    if events:
+                        latest = max(e.timestamp for e in events)
+                        server.scan_watermark = latest.isoformat()
+                    return events
+        except Exception:
+            pass  # journalctl not available, fall back to file
+
+        # Fall back to SFTP file reading
+        log_paths = detect_log_paths(server.os_type)
         for log_path in log_paths:
             try:
-                result = await self.pool.run_command(
-                    server.ip_address, f"cat {log_path}", port=server.ssh_port
+                # Get file info for rotation detection
+                file_info = await SFTPReader.stat_file(conn, log_path)
+                if file_info is None:
+                    continue
+
+                current_size = file_info.size
+                reference_time = file_info.mtime
+
+                # Detect log rotation
+                if (
+                    server.last_log_size is not None
+                    and current_size < server.last_log_size
+                ):
+                    # File shrank - rotation happened, re-read from start
+                    max_lines = settings.log_max_lines_initial
+
+                content = await SFTPReader.read_file_tail(
+                    conn, log_path, max_lines=max_lines
                 )
-                if result.exit_status == 0 and result.stdout:
-                    events = parse_log(result.stdout, server.os_type)
+                if content:
+                    events = parse_log(content, server.os_type, reference_time)
+
+                    # Filter by watermark for incremental scanning
+                    if server.scan_watermark and events:
+                        try:
+                            wm = datetime.fromisoformat(server.scan_watermark)
+                            events = [e for e in events if e.timestamp > wm]
+                        except ValueError:
+                            pass
+
+                    # Update watermark and log size
+                    if events:
+                        latest = max(e.timestamp for e in events)
+                        server.scan_watermark = latest.isoformat()
+                    server.last_log_size = current_size
+
                     all_events.extend(events)
                     break  # Found a working log path
             except Exception as e:
@@ -148,11 +248,13 @@ class SpiderEngine:
 
         return all_events
 
-    async def _scan_server_keys(self, server: Server) -> list[DiscoveredKey]:
+    async def _scan_server_keys(
+        self, server: Server, conn
+    ) -> list[DiscoveredKey]:
         """Scan server for SSH key material."""
         try:
             return await scan_server_keys(
-                self.pool, server.ip_address, server.ssh_port, server.os_type
+                conn, server.ip_address, server.ssh_port, server.os_type
             )
         except Exception as e:
             logger.warning("Key scan failed for %s: %s", server.hostname, e)
@@ -177,50 +279,77 @@ class SpiderEngine:
                 fingerprint_sha256=dk.fingerprint_sha256,
             )
 
+            # Update file_mtime on SSHKey (keep oldest)
+            if dk.file_mtime:
+                if ssh_key.file_mtime is None or dk.file_mtime < ssh_key.file_mtime:
+                    ssh_key.file_mtime = dk.file_mtime
+                if ssh_key.file_mtime:
+                    ssh_key.estimated_age_days = (
+                        datetime.now(timezone.utc) - ssh_key.file_mtime
+                    ).days
+
+            # Determine graph layer
+            graph_layer = "authorization" if dk.file_type == "authorized_keys" else "authorization"
+
             # Record location
-            await get_or_create(
+            kl, kl_created = await get_or_create(
                 self.session,
                 KeyLocation,
                 defaults={
                     "file_type": dk.file_type,
                     "unix_owner": dk.unix_owner,
                     "unix_permissions": dk.unix_permissions,
+                    "graph_layer": graph_layer,
+                    "file_mtime": dk.file_mtime,
+                    "file_size": dk.file_size,
                     "last_verified_at": datetime.now(timezone.utc),
                 },
                 ssh_key_id=ssh_key.id,
                 server_id=server.id,
                 file_path=dk.file_path,
             )
+            if not kl_created:
+                kl.last_verified_at = datetime.now(timezone.utc)
+                kl.file_mtime = dk.file_mtime
+                kl.file_size = dk.file_size
+                kl.unix_permissions = dk.unix_permissions
 
     async def _store_events(self, server: Server, events: list[AuthEvent]) -> dict[str, int]:
         """Store auth events in the database and return fingerprint-to-key-id map."""
+        if not events:
+            return {}
+
+        # Batch pre-fetch: fingerprint -> key_id
+        fingerprints = {e.fingerprint for e in events if e.fingerprint}
         key_map: dict[str, int] = {}
-
-        for event in events:
-            # Try to match fingerprint to known key
-            ssh_key_id = None
-            if event.fingerprint:
-                if event.fingerprint not in key_map:
-                    result = await self.session.execute(
-                        select(SSHKey).where(
-                            SSHKey.fingerprint_sha256 == event.fingerprint
-                        )
-                    )
-                    key = result.scalar_one_or_none()
-                    if key:
-                        key_map[event.fingerprint] = key.id
-                ssh_key_id = key_map.get(event.fingerprint)
-
-            # Try to match source IP to known server
-            source_server_id = None
+        if fingerprints:
             result = await self.session.execute(
-                select(Server).where(Server.ip_address == event.source_ip)
+                select(SSHKey.fingerprint_sha256, SSHKey.id).where(
+                    SSHKey.fingerprint_sha256.in_(fingerprints)
+                )
             )
-            source_server = result.scalar_one_or_none()
-            if source_server:
-                source_server_id = source_server.id
+            for fp, kid in result.all():
+                key_map[fp] = kid
 
-            access_event = AccessEvent(
+        # Batch pre-fetch: source_ip -> server_id
+        source_ips = {e.source_ip for e in events if e.source_ip}
+        ip_map: dict[str, int] = {}
+        if source_ips:
+            result = await self.session.execute(
+                select(Server.ip_address, Server.id).where(
+                    Server.ip_address.in_(source_ips)
+                )
+            )
+            for ip, sid in result.all():
+                ip_map[ip] = sid
+
+        # Bulk create access events
+        access_events = []
+        for event in events:
+            ssh_key_id = key_map.get(event.fingerprint) if event.fingerprint else None
+            source_server_id = ip_map.get(event.source_ip)
+
+            access_events.append(AccessEvent(
                 target_server_id=server.id,
                 source_ip=event.source_ip,
                 source_server_id=source_server_id,
@@ -231,29 +360,87 @@ class SpiderEngine:
                 event_type=event.event_type,
                 event_time=event.timestamp,
                 raw_log_line=event.raw_line,
-            )
-            self.session.add(access_event)
+            ))
 
-            # Update or create access path
-            if event.event_type == "accepted":
-                now = datetime.now(timezone.utc)
-                path, created = await get_or_create(
-                    self.session,
-                    AccessPath,
-                    defaults={
-                        "first_seen_at": event.timestamp,
-                        "last_seen_at": event.timestamp,
-                    },
-                    source_server_id=source_server_id,
-                    target_server_id=server.id,
-                    ssh_key_id=ssh_key_id,
-                    username=event.username,
-                )
-                if not created:
-                    path.last_seen_at = event.timestamp
-                    path.event_count += 1
+        self.session.add_all(access_events)
+
+        # Batch update/create access paths for accepted events
+        for event in events:
+            if event.event_type != "accepted":
+                continue
+
+            ssh_key_id = key_map.get(event.fingerprint) if event.fingerprint else None
+            source_server_id = ip_map.get(event.source_ip)
+
+            path, created = await get_or_create(
+                self.session,
+                AccessPath,
+                defaults={
+                    "first_seen_at": event.timestamp,
+                    "last_seen_at": event.timestamp,
+                    "is_used": True,
+                },
+                source_server_id=source_server_id,
+                target_server_id=server.id,
+                ssh_key_id=ssh_key_id,
+                username=event.username,
+            )
+            if not created:
+                path.last_seen_at = event.timestamp
+                path.event_count += 1
+                path.is_used = True
 
         return key_map
+
+    async def _cross_reference_layers(self, server: Server) -> None:
+        """After storing keys and events, reconcile graph layers.
+
+        - Keys in authorized_keys that are also seen in logs -> "both"
+        - Keys seen in logs but not in authorized_keys -> create "usage" location
+        - Update access_path is_authorized flags
+        """
+        # Get all authorized key fingerprints on this server
+        result = await self.session.execute(
+            select(KeyLocation.ssh_key_id).where(
+                KeyLocation.server_id == server.id,
+                KeyLocation.file_type == "authorized_keys",
+            )
+        )
+        authorized_key_ids = {row[0] for row in result.all()}
+
+        # Get all key IDs seen in accepted events on this server
+        result = await self.session.execute(
+            select(AccessEvent.ssh_key_id).where(
+                AccessEvent.target_server_id == server.id,
+                AccessEvent.event_type == "accepted",
+                AccessEvent.ssh_key_id.isnot(None),
+            ).distinct()
+        )
+        used_key_ids = {row[0] for row in result.all()}
+
+        # Keys that are both authorized and used
+        both_ids = authorized_key_ids & used_key_ids
+        if both_ids:
+            result = await self.session.execute(
+                select(KeyLocation).where(
+                    KeyLocation.server_id == server.id,
+                    KeyLocation.ssh_key_id.in_(both_ids),
+                    KeyLocation.file_type == "authorized_keys",
+                )
+            )
+            for kl in result.scalars().all():
+                kl.graph_layer = "both"
+
+        # Update access paths with is_authorized flag
+        result = await self.session.execute(
+            select(AccessPath).where(
+                AccessPath.target_server_id == server.id,
+                AccessPath.ssh_key_id.isnot(None),
+            )
+        )
+        for path in result.scalars().all():
+            path.is_authorized = path.ssh_key_id in authorized_key_ids
+            path.is_used = path.ssh_key_id in used_key_ids
 
     async def _process_source_ip(
         self, source_ip: str, target_server: Server, current_depth: int

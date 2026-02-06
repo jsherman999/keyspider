@@ -34,6 +34,10 @@ app.conf.update(
             "task": "keyspider.workers.watch_tasks.health_check_watchers",
             "schedule": crontab(minute="*/5"),  # Every 5 minutes
         },
+        "agent-health-check": {
+            "task": "keyspider.workers.scan_tasks.check_agent_health",
+            "schedule": crontab(minute="*/5"),  # Every 5 minutes
+        },
     },
 )
 

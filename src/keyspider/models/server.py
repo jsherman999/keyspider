@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Index, Integer, String, UniqueConstraint, func
+from sqlalchemy import Boolean, DateTime, Index, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import INET
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -30,6 +30,13 @@ class Server(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
 
+    # Incremental scanning
+    scan_watermark: Mapped[str | None] = mapped_column(Text)
+    last_log_size: Mapped[int | None] = mapped_column(Integer)
+
+    # Agent support
+    prefer_agent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
     # Relationships
     key_locations: Mapped[list["KeyLocation"]] = relationship(back_populates="server", cascade="all, delete-orphan")
     target_events: Mapped[list["AccessEvent"]] = relationship(
@@ -39,6 +46,7 @@ class Server(Base):
         back_populates="source_server", foreign_keys="AccessEvent.source_server_id"
     )
     watch_sessions: Mapped[list["WatchSession"]] = relationship(back_populates="server")
+    agent_status: Mapped["AgentStatus | None"] = relationship(back_populates="server", uselist=False)
 
     __table_args__ = (
         UniqueConstraint("ip_address", "ssh_port"),

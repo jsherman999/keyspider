@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, UniqueConstraint, func
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, UniqueConstraint, func, Boolean
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from keyspider.db.session import Base
@@ -24,6 +24,9 @@ class KeyLocation(Base):
     file_type: Mapped[str] = mapped_column(String(30), nullable=False)
     unix_owner: Mapped[str | None] = mapped_column(String(100))
     unix_permissions: Mapped[str | None] = mapped_column(String(10))
+    graph_layer: Mapped[str] = mapped_column(String(20), nullable=False, default="authorization")
+    file_mtime: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    file_size: Mapped[int | None] = mapped_column(Integer)
     last_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

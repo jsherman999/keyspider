@@ -10,6 +10,8 @@ from keyspider.models.watch_session import WatchSession
 from keyspider.models.unreachable_source import UnreachableSource
 from keyspider.models.user import User
 from keyspider.models.api_key import APIKey
+from keyspider.models.agent_status import AgentStatus
+from keyspider.models.sudo_event import SudoEvent
 
 __all__ = [
     "Server",
@@ -22,4 +24,6 @@ __all__ = [
     "UnreachableSource",
     "User",
     "APIKey",
+    "AgentStatus",
+    "SudoEvent",
 ]

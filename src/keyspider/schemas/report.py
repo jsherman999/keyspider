@@ -73,3 +73,25 @@ class AlertAcknowledge(BaseModel):
 
 class AlertNotes(BaseModel):
     notes: str
+
+
+class DormantKeyItem(BaseModel):
+    ssh_key_id: int
+    fingerprint_sha256: str
+    key_type: str
+    comment: str | None
+    server_id: int
+    server_hostname: str
+    file_path: str
+    first_seen_at: datetime
+    days_since_first_seen: int
+
+
+class MysteryKeyItem(BaseModel):
+    fingerprint: str | None
+    last_source_ip: str | None
+    last_username: str | None
+    server_id: int
+    server_hostname: str
+    event_count: int
+    last_seen_at: datetime

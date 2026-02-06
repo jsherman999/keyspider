@@ -44,41 +44,57 @@ async def _scan_keys_for_server(server_id: int):
             return {"error": "Server not found"}
 
         try:
-            keys = await scan_server_keys(pool, server.ip_address, server.ssh_port, server.os_type)
+            wrapper = await pool.get_connection(server.ip_address, server.ssh_port)
+            try:
+                conn = wrapper.conn
+                keys = await scan_server_keys(conn, server.ip_address, server.ssh_port, server.os_type)
 
-            keys_stored = 0
-            for dk in keys:
-                if not dk.fingerprint_sha256:
-                    continue
-                ssh_key, _ = await get_or_create(
-                    session, SSHKey,
-                    defaults={
-                        "fingerprint_md5": dk.fingerprint_md5,
-                        "key_type": dk.key_type or "unknown",
-                        "public_key_data": dk.public_key_data,
-                        "comment": dk.comment,
-                        "is_host_key": dk.is_host_key,
-                    },
-                    fingerprint_sha256=dk.fingerprint_sha256,
-                )
-                await get_or_create(
-                    session, KeyLocation,
-                    defaults={
-                        "file_type": dk.file_type,
-                        "unix_owner": dk.unix_owner,
-                        "unix_permissions": dk.unix_permissions,
-                        "last_verified_at": datetime.now(timezone.utc),
-                    },
-                    ssh_key_id=ssh_key.id,
-                    server_id=server.id,
-                    file_path=dk.file_path,
-                )
-                keys_stored += 1
+                keys_stored = 0
+                for dk in keys:
+                    if not dk.fingerprint_sha256:
+                        continue
+                    ssh_key, _ = await get_or_create(
+                        session, SSHKey,
+                        defaults={
+                            "fingerprint_md5": dk.fingerprint_md5,
+                            "key_type": dk.key_type or "unknown",
+                            "public_key_data": dk.public_key_data,
+                            "comment": dk.comment,
+                            "is_host_key": dk.is_host_key,
+                        },
+                        fingerprint_sha256=dk.fingerprint_sha256,
+                    )
 
-            server.last_scanned_at = datetime.now(timezone.utc)
-            await session.commit()
+                    if dk.file_mtime:
+                        if ssh_key.file_mtime is None or dk.file_mtime < ssh_key.file_mtime:
+                            ssh_key.file_mtime = dk.file_mtime
+                        if ssh_key.file_mtime:
+                            ssh_key.estimated_age_days = (
+                                datetime.now(timezone.utc) - ssh_key.file_mtime
+                            ).days
 
-            return {"keys_found": keys_stored}
+                    await get_or_create(
+                        session, KeyLocation,
+                        defaults={
+                            "file_type": dk.file_type,
+                            "unix_owner": dk.unix_owner,
+                            "unix_permissions": dk.unix_permissions,
+                            "file_mtime": dk.file_mtime,
+                            "file_size": dk.file_size,
+                            "last_verified_at": datetime.now(timezone.utc),
+                        },
+                        ssh_key_id=ssh_key.id,
+                        server_id=server.id,
+                        file_path=dk.file_path,
+                    )
+                    keys_stored += 1
+
+                server.last_scanned_at = datetime.now(timezone.utc)
+                await session.commit()
+
+                return {"keys_found": keys_stored}
+            finally:
+                await pool.release_connection(wrapper.wrapper_id)
         except Exception as e:
             logger.error("Key scan failed for server %d: %s", server_id, e)
             return {"error": str(e)}

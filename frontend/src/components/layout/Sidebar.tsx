@@ -8,6 +8,7 @@ const navItems = [
   { path: '/graph', label: 'Graph', icon: 'G' },
   { path: '/scanner', label: 'Scanner', icon: 'R' },
   { path: '/watcher', label: 'Watcher', icon: 'W' },
+  { path: '/agents', label: 'Agents', icon: 'D' },
   { path: '/alerts', label: 'Alerts', icon: 'A' },
   { path: '/reports', label: 'Reports', icon: 'P' },
   { path: '/settings', label: 'Settings', icon: 'C' },

@@ -5,6 +5,103 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-02-05
+
+Major update: agent system, SFTP-based scanning, graph layers, sudo monitoring, and expanded test coverage.
+
+### Added
+
+#### Agent System
+- **Agent script** (`agent/keyspider_agent.py`): Standalone stdlib-only Python agent deployed to target servers via SSH. Runs as systemd service with heartbeat, incremental SSH auth log collection, sudo event monitoring, key inventory scanning, and bearer token auth.
+- **Agent manager** (`core/agent_manager.py`): Deploys/uninstalls agents via SSH+SFTP. Generates unique tokens (SHA256 hashed), renders agent config, uploads systemd unit, manages lifecycle.
+- **Agent receiver API** (`api/agent_receiver.py`): Endpoints for agents to report data -- `POST /api/agent/heartbeat`, `/events`, `/sudo-events`, `/keys`. Token-based auth with SHA256 verification.
+- **Agent management API** (`api/agents.py`): Operator endpoints -- `GET /api/agents`, `GET/POST /api/agents/{server_id}`, deploy, deploy-batch, uninstall, sudo-events.
+- **AgentStatus model** (`models/agent_status.py`): Tracks deployment status, heartbeat, version, token hash per server.
+- **SudoEvent model** (`models/sudo_event.py`): Records sudo command executions with username, command, target user, working directory, TTY, and success status.
+- **Agent schemas** (`schemas/agent.py`): Request/response schemas for all agent endpoints.
+
+#### SFTP-based File Operations
+- **SFTP reader** (`core/sftp_reader.py`): Secure file operations via asyncssh SFTP client -- `read_file`, `read_file_tail`, `stat_file`, `list_dir`, `file_exists`. Eliminates all shell command injection vectors.
+- Key scanner rewritten to use SFTP instead of `cat`/shell commands.
+- Spider engine log reading uses SFTP with bounded line limits.
+
+#### Authorization vs Usage Graph Layers
+- `KeyLocation.graph_layer` field: classifies keys as `"authorization"` (in authorized_keys) or `"usage"` (seen in logs).
+- `AccessPath.is_authorized` and `is_used` flags for dormant/mystery key detection.
+- `GraphBuilder.build_layered_graph()` method with `show_dormant` and `show_mystery` toggles.
+- `GET /api/graph` now accepts optional `layer` query parameter.
+- `GET /api/graph/layered` endpoint for layered graph views.
+
+#### Reports
+- `GET /api/reports/dormant-keys` -- Authorized keys that have never been used.
+- `GET /api/reports/mystery-keys` -- Keys used in authentication but not found in any authorized_keys file.
+- `GET /api/reports/stale-keys` now accepts optional `age_days` filter parameter.
+
+#### Journalctl Support
+- `parse_journalctl_json()` and `parse_journalctl_output()` in log parser for structured systemd journal parsing.
+- Spider engine tries journalctl first, falls back to syslog file reading.
+- Accurate timestamps from journald (avoids syslog year ambiguity).
+
+#### Sudo Event Parsing
+- `parse_sudo_line()` in log parser for extracting sudo events from auth logs.
+- Captures: username, target user, command, working directory, TTY, success/failure.
+
+#### Key Age Tracking
+- `SSHKey.file_mtime` and `estimated_age_days` fields.
+- `KeyLocation.file_mtime` and `file_size` fields.
+- File modification times captured via SFTP stat during key scanning.
+
+#### Frontend
+- **Agents page** (`pages/Agents.tsx`): Server table with agent status, deploy/uninstall actions, health indicators.
+- **Server detail**: Added Agent tab (status, heartbeat, version, deploy/uninstall) and Sudo tab (sudo event history).
+- **Alerts page**: Tabbed interface with "Unreachable Sources" and "Mystery Keys" tabs.
+- **Reports page**: Added "Dormant Keys" and "Mystery Keys" tabs.
+- **Graph Explorer**: Layer filter dropdown (All/Authorization/Usage), dormant and mystery edge highlighting.
+- **Sidebar**: Added Agents navigation item.
+- **Agent query hooks** (`api/queries/agents.ts`): `useAgents`, `useAgentStatus`, `useDeployAgent`, `useUninstallAgent`, `useSudoEvents`.
+
+### Changed
+
+#### SSH Connection Pool
+- Renamed internal connection tracking to use `wrapper_id` (UUID) for unambiguous release/close.
+- Health checks run outside the connection lock to prevent pool stalls.
+- Lazy singleton initialization via `get_ssh_pool()` / `set_ssh_pool()` (replaces module-level global).
+
+#### Incremental Scanning
+- `Server.scan_watermark` field for tracking last processed event timestamp.
+- Log parsing filters events before watermark on incremental scans.
+- Log rotation detection via file size comparison.
+- Configurable line limits: `LOG_MAX_LINES_INITIAL` (50000), `LOG_MAX_LINES_INCREMENTAL` (50000).
+
+#### Syslog Year Handling
+- Log parser accepts `reference_time` parameter (file mtime from SFTP stat).
+- Sequential timestamp tracking with year rollover detection (>300 day backward jump triggers year decrement).
+
+#### Batch Database Operations
+- Spider engine pre-fetches fingerprint→key_id and source_ip→server_id mappings in bulk queries.
+- Bulk `session.add_all()` for access events instead of individual inserts.
+
+#### Watcher Callback Cleanup
+- Event queues tracked in `_event_queues` list for cleanup.
+- `stop()` sends None sentinel to unblock all waiting generators.
+- `events()` generator uses try/finally to remove callback on exit.
+
+#### Scan Tasks
+- Servers with active agents (heartbeat < 5 min) skip SSH scanning automatically.
+- `prefer_agent` flag on Server model controls scan behavior.
+
+### Fixed
+- Shell command injection vectors eliminated by replacing all `run_command(f"cat {path}")` with SFTP reads.
+- Connection pool health check no longer blocks under lock.
+- Watcher callback leak on generator abandonment.
+
+### Testing
+- **135 tests** (all passing), up from 54 in v0.1.0.
+- New test files: `test_sftp_reader.py`, `test_connection_pool.py`, `test_agent_manager.py`, `test_agent_receiver.py`, `test_graph_layers.py`, `test_sudo_parser.py`.
+- Updated: `test_log_parser.py` (journalctl, sudo, year rollover), `test_scan_workflow.py` (new model fields, agent status, sudo events), `test_api.py` (new endpoint auth tests).
+
+---
+
 ## [0.1.0] - 2026-02-03
 
 Initial implementation of Keyspider SSH key monitoring application.
@@ -22,7 +119,7 @@ Initial implementation of Keyspider SSH key monitoring application.
 - **Graph Builder** (`core/graph_builder.py`): Constructs Cytoscape-compatible graph responses from database records. Supports full graph, server-centered subgraph (configurable depth), key-centered subgraph, and BFS path-finding between servers.
 
 #### Database
-- **10 SQLAlchemy ORM models**: `Server`, `SSHKey`, `KeyLocation`, `AccessEvent`, `AccessPath`, `ScanJob`, `WatchSession`, `UnreachableSource`, `User`, `APIKey`.
+- **10 SQLAlchemy ORM models** (initial set): `Server`, `SSHKey`, `KeyLocation`, `AccessEvent`, `AccessPath`, `ScanJob`, `WatchSession`, `UnreachableSource`, `User`, `APIKey`.
 - **Async session factory** with `asyncpg` driver for PostgreSQL 13.
 - **Query helpers**: `paginate()` for list endpoints with offset/limit/total, `get_or_create()` for upsert patterns.
 - **Alembic migration environment** configured for async engine.
@@ -112,4 +209,5 @@ Initial implementation of Keyspider SSH key monitoring application.
 - **Test fixtures**: Sample auth logs for Debian, RHEL, and AIX; sample `authorized_keys` with options.
 - **SQLite test adapter**: `before_create` event listener that patches PostgreSQL `INET` to `String(45)` and `JSONB` to `JSON()` for in-memory SQLite test database.
 
+[0.2.0]: https://github.com/jsherman999/keyspider/releases/tag/v0.2.0
 [0.1.0]: https://github.com/jsherman999/keyspider/releases/tag/v0.1.0

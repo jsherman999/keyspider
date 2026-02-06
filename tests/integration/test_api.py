@@ -2,6 +2,8 @@
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import JSON, String
+from sqlalchemy.dialects.postgresql import INET, JSONB
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from keyspider.main import app
@@ -13,13 +15,15 @@ async def _override_get_db():
     """Provide a SQLite test database session for API tests."""
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
 
-    # Apply INET -> String fix for SQLite
-    from sqlalchemy import String
-    from sqlalchemy.dialects.postgresql import INET
+    import keyspider.models  # noqa: F401
+
+    # Apply INET/JSONB -> String/JSON fix for SQLite
     for table in Base.metadata.tables.values():
         for column in table.columns:
             if isinstance(column.type, INET):
                 column.type = String(45)
+            elif isinstance(column.type, JSONB):
+                column.type = JSON()
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -62,3 +66,39 @@ async def test_login_invalid_credentials():
             assert response.status_code == 401
     finally:
         app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_agents_endpoint_requires_auth():
+    """Verify that the agents endpoint requires authentication."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/agents")
+        assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_reports_dormant_keys_requires_auth():
+    """Verify that dormant keys report requires authentication."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/reports/dormant-keys")
+        assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_reports_mystery_keys_requires_auth():
+    """Verify that mystery keys report requires authentication."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/reports/mystery-keys")
+        assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_graph_layered_requires_auth():
+    """Verify that layered graph endpoint requires authentication."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/graph/layered")
+        assert response.status_code == 401

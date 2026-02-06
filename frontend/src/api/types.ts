@@ -10,6 +10,7 @@ export interface Server {
   is_reachable: boolean;
   last_scanned_at: string | null;
   discovered_via: string | null;
+  prefer_agent: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -22,6 +23,8 @@ export interface SSHKey {
   key_bits: number | null;
   comment: string | null;
   is_host_key: boolean;
+  file_mtime: string | null;
+  estimated_age_days: number | null;
   first_seen_at: string;
   created_at: string;
 }
@@ -40,6 +43,9 @@ export interface KeyLocation {
   file_type: string;
   unix_owner: string | null;
   unix_permissions: string | null;
+  graph_layer: string;
+  file_mtime: string | null;
+  file_size: number | null;
   last_verified_at: string | null;
   server_hostname: string | null;
 }
@@ -69,6 +75,8 @@ export interface AccessPath {
   last_seen_at: string;
   event_count: number;
   is_active: boolean;
+  is_authorized: boolean;
+  is_used: boolean;
 }
 
 export interface ScanJob {
@@ -121,6 +129,8 @@ export interface GraphEdge {
   username: string | null;
   event_count: number;
   is_active: boolean;
+  is_authorized: boolean | null;
+  is_used: boolean | null;
 }
 
 export interface GraphData {
@@ -181,4 +191,52 @@ export interface User {
 export interface TokenResponse {
   access_token: string;
   token_type: string;
+}
+
+export interface AgentStatus {
+  id: number;
+  server_id: number;
+  agent_version: string | null;
+  deployment_status: string;
+  last_heartbeat_at: string | null;
+  last_event_at: string | null;
+  installed_at: string | null;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SudoEvent {
+  id: number;
+  server_id: number;
+  username: string;
+  command: string | null;
+  target_user: string | null;
+  working_dir: string | null;
+  tty: string | null;
+  event_time: string;
+  success: boolean;
+  created_at: string;
+}
+
+export interface DormantKey {
+  ssh_key_id: number;
+  fingerprint_sha256: string;
+  key_type: string;
+  comment: string | null;
+  server_id: number;
+  server_hostname: string;
+  file_path: string;
+  first_seen_at: string;
+  days_since_first_seen: number;
+}
+
+export interface MysteryKey {
+  fingerprint: string | null;
+  last_source_ip: string | null;
+  last_username: string | null;
+  server_id: number;
+  server_hostname: string;
+  event_count: number;
+  last_seen_at: string;
 }

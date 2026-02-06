@@ -24,6 +24,8 @@ class SSHKey(Base):
     first_seen_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    file_mtime: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    estimated_age_days: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

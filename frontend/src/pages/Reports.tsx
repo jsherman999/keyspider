@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import api from '../api/client';
 import { Card } from '../components/common/Card';
 import { Badge } from '../components/common/Badge';
-import type { SummaryReport } from '../api/types';
+import type { SummaryReport, DormantKey, MysteryKey } from '../api/types';
 
 interface KeyExposure {
   ssh_key_id: number;
@@ -23,8 +23,10 @@ interface StaleKey {
   days_since_use: number | null;
 }
 
+type TabKey = 'summary' | 'exposure' | 'stale' | 'dormant' | 'mystery' | 'sudo';
+
 export default function Reports() {
-  const [activeTab, setActiveTab] = useState<'summary' | 'exposure' | 'stale'>('summary');
+  const [activeTab, setActiveTab] = useState<TabKey>('summary');
 
   const { data: summary } = useQuery({
     queryKey: ['report-summary'],
@@ -44,10 +46,24 @@ export default function Reports() {
     enabled: activeTab === 'stale',
   });
 
-  const tabs = [
-    { key: 'summary' as const, label: 'Summary' },
-    { key: 'exposure' as const, label: 'Key Exposure' },
-    { key: 'stale' as const, label: 'Stale Keys' },
+  const { data: dormant } = useQuery({
+    queryKey: ['report-dormant'],
+    queryFn: () => api.get<DormantKey[]>('/reports/dormant-keys').then((r) => r.data),
+    enabled: activeTab === 'dormant',
+  });
+
+  const { data: mystery } = useQuery({
+    queryKey: ['report-mystery'],
+    queryFn: () => api.get<MysteryKey[]>('/reports/mystery-keys').then((r) => r.data),
+    enabled: activeTab === 'mystery',
+  });
+
+  const tabs: { key: TabKey; label: string }[] = [
+    { key: 'summary', label: 'Summary' },
+    { key: 'exposure', label: 'Key Exposure' },
+    { key: 'stale', label: 'Stale Keys' },
+    { key: 'dormant', label: 'Dormant Keys' },
+    { key: 'mystery', label: 'Mystery Keys' },
   ];
 
   return (
@@ -130,6 +146,51 @@ export default function Reports() {
           ))}
           {stale?.length === 0 && (
             <div className="text-center text-sm text-gray-500 py-8">No stale keys found</div>
+          )}
+        </div>
+      )}
+
+      {activeTab === 'dormant' && (
+        <div className="space-y-3">
+          {dormant?.map((item) => (
+            <div key={`${item.ssh_key_id}-${item.server_id}`} className="rounded-lg border border-orange-800/30 bg-gray-900 p-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <span className="font-mono text-xs text-gray-200">{item.fingerprint_sha256}</span>
+                  <div className="mt-1 text-xs text-gray-400">
+                    {item.server_hostname} — {item.file_path}
+                  </div>
+                  {item.comment && <div className="text-xs text-gray-500">{item.comment}</div>}
+                </div>
+                <Badge variant="warning">
+                  Dormant {item.days_since_first_seen}d
+                </Badge>
+              </div>
+            </div>
+          ))}
+          {dormant?.length === 0 && (
+            <div className="text-center text-sm text-gray-500 py-8">No dormant keys found — all authorized keys are being used</div>
+          )}
+        </div>
+      )}
+
+      {activeTab === 'mystery' && (
+        <div className="space-y-3">
+          {mystery?.map((item, i) => (
+            <div key={i} className="rounded-lg border border-red-800/30 bg-gray-900 p-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <span className="font-mono text-xs text-red-300">{item.fingerprint || 'Unknown fingerprint'}</span>
+                  <div className="mt-1 text-xs text-gray-400">
+                    {item.server_hostname} — from {item.last_source_ip} as {item.last_username}
+                  </div>
+                </div>
+                <Badge variant="danger">{item.event_count} events</Badge>
+              </div>
+            </div>
+          ))}
+          {mystery?.length === 0 && (
+            <div className="text-center text-sm text-gray-500 py-8">No mystery keys found — all used keys are in authorized_keys</div>
           )}
         </div>
       )}

@@ -2,6 +2,8 @@
 
 from fastapi import APIRouter
 
+from keyspider.api.agent_receiver import router as agent_receiver_router
+from keyspider.api.agents import router as agents_router
 from keyspider.api.auth import router as auth_router
 from keyspider.api.graph import router as graph_router
 from keyspider.api.keys import router as keys_router
@@ -21,3 +23,5 @@ api_router.include_router(watch_router, prefix="/watch", tags=["watch"])
 api_router.include_router(graph_router, prefix="/graph", tags=["graph"])
 api_router.include_router(reports_router, prefix="/reports", tags=["reports"])
 api_router.include_router(ws_router, prefix="/ws", tags=["websocket"])
+api_router.include_router(agents_router, prefix="/agents", tags=["agents"])
+api_router.include_router(agent_receiver_router, prefix="/agent", tags=["agent-receiver"])
